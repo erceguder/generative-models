@@ -25,6 +25,7 @@ def sample(
     input_path: str = "assets/test_image.png",  # Can either be image file or folder with image files
     num_frames: Optional[int] = None,  # 21 for SV3D
     num_steps: Optional[int] = None,
+    output_resolution: Optional[int] = 224,
     version: str = "svd",
     fps_id: int = 6,
     motion_bucket_id: int = 127,
@@ -106,172 +107,218 @@ def sample(
 
     path = Path(input_path)
     all_img_paths = []
+
     if path.is_file():
-        if any([input_path.endswith(x) for x in ["jpg", "jpeg", "png"]]):
+        if any([input_path.lower().endswith(x) for x in ["jpg", "jpeg", "png"]]):
             all_img_paths = [input_path]
         else:
             raise ValueError("Path is not valid image file.")
+
     elif path.is_dir():
-        all_img_paths = sorted(
+        class_paths = sorted(
             [
                 f
                 for f in path.iterdir()
-                if f.is_file() and f.suffix.lower() in [".jpg", ".jpeg", ".png"]
+                if f.is_dir()
             ]
         )
-        if len(all_img_paths) == 0:
-            raise ValueError("Folder does not contain any images.")
+        all_img_paths = []
+
+        for class_path in class_paths:
+            class_path = Path(class_path)
+            img_paths = sorted(
+                [
+                    f
+                    for f in class_path.iterdir()
+                    if f.is_file() and f.suffix.lower() in [".jpg", ".jpeg", ".png"]
+                ]
+            )
+            if len(img_paths) == 0:
+                raise ValueError("Folder does not contain any images.")
+
+            all_img_paths.append(img_paths)
     else:
         raise ValueError
 
-    for input_img_path in all_img_paths:
-        if "sv3d" in version:
-            image = Image.open(input_img_path)
-            if image.mode == "RGBA":
-                pass
-            else:
-                # remove bg
-                image.thumbnail([768, 768], Image.Resampling.LANCZOS)
-                image = remove(image.convert("RGBA"), alpha_matting=True)
-
-            # resize object in frame
-            image_arr = np.array(image)
-            in_w, in_h = image_arr.shape[:2]
-            ret, mask = cv2.threshold(
-                np.array(image.split()[-1]), 0, 255, cv2.THRESH_BINARY
-            )
-            x, y, w, h = cv2.boundingRect(mask)
-            max_size = max(w, h)
-            side_len = (
-                int(max_size / image_frame_ratio)
-                if image_frame_ratio is not None
-                else in_w
-            )
-            padded_image = np.zeros((side_len, side_len, 4), dtype=np.uint8)
-            center = side_len // 2
-            padded_image[
-                center - h // 2 : center - h // 2 + h,
-                center - w // 2 : center - w // 2 + w,
-            ] = image_arr[y : y + h, x : x + w]
-            # resize frame to 576x576
-            rgba = Image.fromarray(padded_image).resize((576, 576), Image.LANCZOS)
-            # white bg
-            rgba_arr = np.array(rgba) / 255.0
-            rgb = rgba_arr[..., :3] * rgba_arr[..., -1:] + (1 - rgba_arr[..., -1:])
-            input_image = Image.fromarray((rgb * 255).astype(np.uint8))
-
-        else:
-            with Image.open(input_img_path) as image:
+    # for input_img_path in all_img_paths:
+    for class_paths in all_img_paths:
+        for input_img_path in class_paths:
+            class_path = os.path.split(os.path.split(input_img_path)[0])[1]
+            if "sv3d" in version:
+                image = Image.open(input_img_path)
                 if image.mode == "RGBA":
-                    input_image = image.convert("RGB")
-                w, h = image.size
+                    pass
+                else:
+                    # remove bg
+                    image.thumbnail([768, 768], Image.Resampling.LANCZOS)
+                    image = remove(image.convert("RGBA"), alpha_matting=True)
 
-                if h % 64 != 0 or w % 64 != 0:
-                    width, height = map(lambda x: x - x % 64, (w, h))
-                    input_image = input_image.resize((width, height))
-                    print(
-                        f"WARNING: Your image is of size {h}x{w} which is not divisible by 64. We are resizing to {height}x{width}!"
+                # resize object in frame
+                image_arr = np.array(image)
+                in_h, in_w = image_arr.shape[:2]
+                ret, mask = cv2.threshold(
+                    np.array(image.split()[-1]), 0, 255, cv2.THRESH_BINARY
+                )
+                x, y, w, h = cv2.boundingRect(mask)
+                max_size = max(w, h)
+                side_len = (
+                    int(max_size / image_frame_ratio)
+                    if image_frame_ratio is not None
+                    else max(in_w, in_h)
+                )
+                padded_image = np.zeros((side_len, side_len, 4), dtype=np.uint8)
+                center = side_len // 2
+
+                y_start = center - h // 2
+                y_start = 0 if y_start < 0 else y_start
+                x_start = center - w // 2
+                x_start = 0 if x_start < 0 else x_start
+
+                padded_image[
+                    y_start : y_start + h,
+                    x_start : x_start + w,
+                ] = image_arr[y : y + h, x : x + w]
+                # resize frame to 576x576
+                rgba = Image.fromarray(padded_image).resize((576, 576), Image.LANCZOS)
+                # white bg
+                rgba_arr = np.array(rgba) / 255.0
+                rgb = rgba_arr[..., :3] * rgba_arr[..., -1:] + (1 - rgba_arr[..., -1:])
+                input_image = Image.fromarray((rgb * 255).astype(np.uint8))
+
+            else:
+                with Image.open(input_img_path) as image:
+                    if image.mode == "RGBA":
+                        input_image = image.convert("RGB")
+                    w, h = image.size
+
+                    if h % 64 != 0 or w % 64 != 0:
+                        width, height = map(lambda x: x - x % 64, (w, h))
+                        input_image = input_image.resize((width, height))
+                        print(
+                            f"WARNING: Your image is of size {h}x{w} which is not divisible by 64. We are resizing to {height}x{width}!"
+                        )
+
+            image = ToTensor()(input_image)
+            image = image * 2.0 - 1.0
+
+            image = image.unsqueeze(0).to(device)
+            H, W = image.shape[2:]
+            assert image.shape[1] == 3
+            F = 8
+            C = 4
+            shape = (num_frames, C, H // F, W // F)
+            if (H, W) != (576, 1024) and "sv3d" not in version:
+                print(
+                    "WARNING: The conditioning frame you provided is not 576x1024. This leads to suboptimal performance as model was only trained on 576x1024. Consider increasing `cond_aug`."
+                )
+            if (H, W) != (576, 576) and "sv3d" in version:
+                print(
+                    "WARNING: The conditioning frame you provided is not 576x576. This leads to suboptimal performance as model was only trained on 576x576."
+                )
+            if motion_bucket_id > 255:
+                print(
+                    "WARNING: High motion bucket! This may lead to suboptimal performance."
+                )
+
+            if fps_id < 5:
+                print("WARNING: Small fps value! This may lead to suboptimal performance.")
+
+            if fps_id > 30:
+                print("WARNING: Large fps value! This may lead to suboptimal performance.")
+
+            value_dict = {}
+            value_dict["cond_frames_without_noise"] = image
+            value_dict["motion_bucket_id"] = motion_bucket_id
+            value_dict["fps_id"] = fps_id
+            value_dict["cond_aug"] = cond_aug
+            value_dict["cond_frames"] = image + cond_aug * torch.randn_like(image)
+            if "sv3d_p" in version:
+                value_dict["polars_rad"] = polars_rad
+                value_dict["azimuths_rad"] = azimuths_rad
+
+            with torch.no_grad():
+                with torch.autocast(device):
+                    batch, batch_uc = get_batch(
+                        get_unique_embedder_keys_from_conditioner(model.conditioner),
+                        value_dict,
+                        [1, num_frames],
+                        T=num_frames,
+                        device=device,
+                    )
+                    c, uc = model.conditioner.get_unconditional_conditioning(
+                        batch,
+                        batch_uc=batch_uc,
+                        force_uc_zero_embeddings=[
+                            "cond_frames",
+                            "cond_frames_without_noise",
+                        ],
                     )
 
-        image = ToTensor()(input_image)
-        image = image * 2.0 - 1.0
+                    for k in ["crossattn", "concat"]:
+                        uc[k] = repeat(uc[k], "b ... -> b t ...", t=num_frames)
+                        uc[k] = rearrange(uc[k], "b t ... -> (b t) ...", t=num_frames)
+                        c[k] = repeat(c[k], "b ... -> b t ...", t=num_frames)
+                        c[k] = rearrange(c[k], "b t ... -> (b t) ...", t=num_frames)
 
-        image = image.unsqueeze(0).to(device)
-        H, W = image.shape[2:]
-        assert image.shape[1] == 3
-        F = 8
-        C = 4
-        shape = (num_frames, C, H // F, W // F)
-        if (H, W) != (576, 1024) and "sv3d" not in version:
-            print(
-                "WARNING: The conditioning frame you provided is not 576x1024. This leads to suboptimal performance as model was only trained on 576x1024. Consider increasing `cond_aug`."
-            )
-        if (H, W) != (576, 576) and "sv3d" in version:
-            print(
-                "WARNING: The conditioning frame you provided is not 576x576. This leads to suboptimal performance as model was only trained on 576x576."
-            )
-        if motion_bucket_id > 255:
-            print(
-                "WARNING: High motion bucket! This may lead to suboptimal performance."
-            )
+                    randn = torch.randn(shape, device=device)
 
-        if fps_id < 5:
-            print("WARNING: Small fps value! This may lead to suboptimal performance.")
+                    additional_model_inputs = {}
+                    additional_model_inputs["image_only_indicator"] = torch.zeros(
+                        2, num_frames
+                    ).to(device)
+                    additional_model_inputs["num_video_frames"] = batch["num_video_frames"]
 
-        if fps_id > 30:
-            print("WARNING: Large fps value! This may lead to suboptimal performance.")
+                    def denoiser(input, sigma, c):
+                        return model.denoiser(
+                            model.model, input, sigma, c, **additional_model_inputs
+                        )
 
-        value_dict = {}
-        value_dict["cond_frames_without_noise"] = image
-        value_dict["motion_bucket_id"] = motion_bucket_id
-        value_dict["fps_id"] = fps_id
-        value_dict["cond_aug"] = cond_aug
-        value_dict["cond_frames"] = image + cond_aug * torch.randn_like(image)
-        if "sv3d_p" in version:
-            value_dict["polars_rad"] = polars_rad
-            value_dict["azimuths_rad"] = azimuths_rad
+                    samples_z = model.sampler(denoiser, randn, cond=c, uc=uc)
 
-        with torch.no_grad():
-            with torch.autocast(device):
-                batch, batch_uc = get_batch(
-                    get_unique_embedder_keys_from_conditioner(model.conditioner),
-                    value_dict,
-                    [1, num_frames],
-                    T=num_frames,
-                    device=device,
-                )
-                c, uc = model.conditioner.get_unconditional_conditioning(
-                    batch,
-                    batch_uc=batch_uc,
-                    force_uc_zero_embeddings=[
-                        "cond_frames",
-                        "cond_frames_without_noise",
-                    ],
-                )
+                    model.en_and_decode_n_samples_a_time = decoding_t
+                    samples_x = model.decode_first_stage(samples_z)
+                    if "sv3d" in version:
+                        samples_x[-1:] = value_dict["cond_frames_without_noise"]
+                    samples = torch.clamp((samples_x + 1.0) / 2.0, min=0.0, max=1.0)
 
-                for k in ["crossattn", "concat"]:
-                    uc[k] = repeat(uc[k], "b ... -> b t ...", t=num_frames)
-                    uc[k] = rearrange(uc[k], "b t ... -> (b t) ...", t=num_frames)
-                    c[k] = repeat(c[k], "b ... -> b t ...", t=num_frames)
-                    c[k] = rearrange(c[k], "b t ... -> (b t) ...", t=num_frames)
+                    if path.is_dir():
+                        output_subfolder = os.path.join(output_folder, class_path)
+                        os.makedirs(output_subfolder, exist_ok=True)
+                        imageio.imwrite(
+                            os.path.join(output_subfolder, os.path.split(input_img_path)[1]), input_image.resize((output_resolution, output_resolution), Image.LANCZOS)
+                        )
+                    else:
+                        os.makedirs(output_folder, exist_ok=True)
+                        base_count = len(glob(os.path.join(output_folder, "*.mp4")))
+                        imageio.imwrite(
+                            os.path.join(output_folder, f"{base_count:06d}.jpg"), input_image.resize((output_resolution, output_resolution), Image.LANCZOS)
+                        )
 
-                randn = torch.randn(shape, device=device)
-
-                additional_model_inputs = {}
-                additional_model_inputs["image_only_indicator"] = torch.zeros(
-                    2, num_frames
-                ).to(device)
-                additional_model_inputs["num_video_frames"] = batch["num_video_frames"]
-
-                def denoiser(input, sigma, c):
-                    return model.denoiser(
-                        model.model, input, sigma, c, **additional_model_inputs
+                    samples = embed_watermark(samples)
+                    samples = filter(samples)
+                    vid = (
+                        (rearrange(samples, "t c h w -> t h w c") * 255)
+                        .cpu()
+                        .numpy()
+                        .astype(np.uint8)
                     )
+                    if path.is_dir():
+                        idx = [0, 4, 8, 12, 16, 20]
+                        vid = vid[idx]
 
-                samples_z = model.sampler(denoiser, randn, cond=c, uc=uc)
-                model.en_and_decode_n_samples_a_time = decoding_t
-                samples_x = model.decode_first_stage(samples_z)
-                if "sv3d" in version:
-                    samples_x[-1:] = value_dict["cond_frames_without_noise"]
-                samples = torch.clamp((samples_x + 1.0) / 2.0, min=0.0, max=1.0)
+                        out = []
+                        for frame in vid:
+                            im = Image.fromarray(frame).resize((output_resolution, output_resolution), Image.LANCZOS)
+                            out.append(np.array(im))
+                        vid = np.stack(out, axis=0)
 
-                os.makedirs(output_folder, exist_ok=True)
-                base_count = len(glob(os.path.join(output_folder, "*.mp4")))
-
-                imageio.imwrite(
-                    os.path.join(output_folder, f"{base_count:06d}.jpg"), input_image
-                )
-
-                samples = embed_watermark(samples)
-                samples = filter(samples)
-                vid = (
-                    (rearrange(samples, "t c h w -> t h w c") * 255)
-                    .cpu()
-                    .numpy()
-                    .astype(np.uint8)
-                )
-                video_path = os.path.join(output_folder, f"{base_count:06d}.mp4")
-                imageio.mimwrite(video_path, vid)
+                        input_img_path = f"{os.path.splitext(os.path.split(input_img_path)[1])[0]}.npz"
+                        array_path = os.path.join(output_subfolder, input_img_path)
+                        with open(array_path, "wb") as f:
+                            np.save(f, vid)
+                    else:
+                        video_path = os.path.join(output_folder, f"{base_count:06d}.mp4")
+                        imageio.mimwrite(video_path, vid)
 
 
 def get_unique_embedder_keys_from_conditioner(conditioner):
